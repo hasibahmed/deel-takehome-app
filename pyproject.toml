@@ -5,12 +5,16 @@ description = ""
 authors = ["Hasib Ahmed <hasib@hasib-ahmed.com>"]
 readme = "README.md"
 
+
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.11.3"
 flask = "^3.0.3"
 pandas = "^2.2.2"
 transformers = "^4.41.2"
 rapidfuzz = "^3.9.3"
+torch = {url = "https://download.pytorch.org/whl/cpu/torch-2.2.0-cp311-none-macosx_10_9_x86_64.whl"}
+numpy = "^1"
+tokenizer = "^3.4.3"
 
 
 [tool.poetry.group.dev.dependencies]
