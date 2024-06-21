@@ -19,12 +19,15 @@ app = Flask(__name__)
 transactions = pd.read_csv('data/transactions.csv')
 users = pd.read_csv('data/users.csv')
 
-# Load model and tokenizer
-model_name = "sentence-transformers/all-MiniLM-L6-v2" #possibility of using other models
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModel.from_pretrained(model_name)
 
-
+def substr(org_str, sub1='from', sub2='for'):
+  """ returns substring in between two strings """
+  s = org_str.lower()
+  idx1 = s.index(sub1)
+  idx2 = s.index(sub2)
+  return s[idx1 + len(sub1)+1 : idx2]
+  
+  # task 1 endpoint 
 @app.route('/match_user', methods=['GET'])
 def match_user():
   """
@@ -45,12 +48,17 @@ def match_user():
       return jsonify({"error": "Transaction not found"}), 404
   
   description = transaction['description'].values[0]
+  sub_str = substr(description)
   logging.debug('%s', description)
+  logging.debug('%s', sub_str)
   
   matches = []
   for _, user in users.iterrows():
-    match_score = extractOne(query=description, choices=[user['name']], scorer=Levenshtein.normalized_similarity)
-    logging.debug('score = ', match_score)
+    match_score = extractOne(query=sub_str, choices=[user['name']], scorer=Levenshtein.normalized_similarity)
+    # match_score = extractOne(query=sub_str, choices=[user['name']], scorer=Levenshtein.distance)
+    # match_score = extractOne(query=sub_str, choices=[user['name']], scorer=ratio)
+    logging.debug('score = %s', match_score)
+    
     if match_score is not None:
       matches.append({"id": user['id'], "name": user['name'], "match_score": match_score[1]})
   
@@ -58,8 +66,48 @@ def match_user():
   
   return jsonify({"users": matches, "total_number_of_matches": len(matches)})
 
+# ----- task 2 ------
+# Load model and tokenizer
+model_name = "sentence-transformers/all-MiniLM-L6-v2" 
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
 
 
+def get_embeddings(text, tokenizer, model):
+  """ Returns embedded text """
+  inputs = tokenizer(text, return_tensors='pt', padding=True, truncation=True)
+  with torch.no_grad():
+      outputs = model(**inputs)
+  # Mean pooling to get sentence embeddings
+  embeddings = outputs.last_hidden_state.mean(dim=1)
+  return embeddings
+
+def find_best_similarity_slice(input_text, target_text, window_size):
+  """ 
+  Finds the best slice in transaction descriptions that matches input string 
+  Returns best slice and its corresponding similarity score and embedding  
+  """
+  input_embedding = get_embeddings(input_text, tokenizer, model)
+  
+  max_similarity = -1
+  best_slice = None
+  best_slice_embedding = None
+
+  for i in range(len(target_text) - window_size + 1):
+      slice_text = target_text[i:i+window_size]
+      slice_embedding = get_embeddings(slice_text, tokenizer, model)
+      similarity = torch.nn.functional.cosine_similarity(input_embedding, slice_embedding)
+      
+      if similarity > max_similarity:
+          max_similarity = similarity.item()
+          best_slice = slice_text
+          best_slice_embedding = slice_embedding
+          best_slice_tokens = slice_embedding.shape[1]
+
+  return best_slice, max_similarity, best_slice_tokens
+
+
+# task 2 endpoint
 @app.route('/similar_transactions', methods=['GET'])
 def similar_transactions():
   """
@@ -75,31 +123,28 @@ def similar_transactions():
       json list of similar transactions ordered by desc embedding score
   """
   input_str = request.args.get('input_str')
+  window_size = len(input_str)
+  
   logging.debug('%s', input_str)
+  
   if not input_str:
       return jsonify({"error": "No input string provided"}), 400
   
-  # Tokenize input string and compute embedding
-  inputs = tokenizer(input_str, return_tensors='pt')
-  input_tokens = inputs['input_ids'].shape[1]
-  logging.debug('%s', input_tokens)  
-  with torch.no_grad():
-      input_embedding = model(**inputs).last_hidden_state.mean(dim=1)
   
   # Calculate similarity with transaction descriptions
   similarities = []
   for _, transaction in transactions.iterrows():
-      desc_inputs = tokenizer(transaction['description'], return_tensors='pt')
-      with torch.no_grad():
-          desc_embedding = model(**desc_inputs).last_hidden_state.mean(dim=1)
+      best_slice, max_similarity, best_slice_tokens = find_best_similarity_slice(input_str, transaction['description'], window_size)
       
-      similarity = torch.nn.functional.cosine_similarity(input_embedding, desc_embedding).item()
-      similarities.append({"id": transaction['id'], "embedding": similarity})
+      logging.debug('best slice = %s', best_slice)
+      logging.debug('max_suimilarity = %s', max_similarity )
+      
+      similarities.append({"id": transaction['id'], "embedding": max_similarity})
   
   # Sort similarities in descending order
   similarities.sort(key=lambda x: x['embedding'], reverse=True)
   
-  return jsonify({"transactions": similarities, "total_number_of_tokens_used": input_tokens})
+  return jsonify({"transactions": similarities, "total_number_of_tokens_used": best_slice_tokens})
   
 if __name__ == '__main__':
     app.run(debug=True)
