@@ -10,7 +10,11 @@ from rapidfuzz.fuzz import ratio
 from transformers import AutoModel, AutoTokenizer
 import torch 
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import logging, sys
+
+# change level accordingly
 logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
 
 app = Flask(__name__)
@@ -92,9 +96,12 @@ def find_best_similarity_slice(input_text, target_text, window_size):
   max_similarity = -1
   best_slice = None
   best_slice_embedding = None
+  
+  target_id = target_text['id']
+  target_desc = target_text['description']
 
-  for i in range(len(target_text) - window_size + 1):
-      slice_text = target_text[i:i+window_size]
+  for i in range(len(target_desc) - window_size + 1):
+      slice_text = target_desc[i:i+window_size]
       slice_embedding = get_embeddings(slice_text, tokenizer, model)
       similarity = torch.nn.functional.cosine_similarity(input_embedding, slice_embedding)
       
@@ -104,7 +111,24 @@ def find_best_similarity_slice(input_text, target_text, window_size):
           best_slice_embedding = slice_embedding
           best_slice_tokens = slice_embedding.shape[1]
 
-  return best_slice, max_similarity, best_slice_tokens
+  return target_id, best_slice, max_similarity, best_slice_tokens
+
+
+
+def compare_with_multiple_targets(input_text, target_texts, window_size):
+  """ Implements Parallel executions """
+  results = []
+  with ProcessPoolExecutor() as executor:
+      # Submit all tasks
+      future_to_target = {executor.submit(find_best_similarity_slice, input_text, target_text, window_size): target_text for target_text in target_texts}
+      # Collect results as they complete
+      for future in as_completed(future_to_target):
+          try:
+              result = future.result()
+              results.append(result)
+          except Exception as exc:
+              print(f"Generated an exception: {exc}")
+  return results
 
 
 # task 2 endpoint
@@ -130,16 +154,18 @@ def similar_transactions():
   if not input_str:
       return jsonify({"error": "No input string provided"}), 400
   
-  
-  # Calculate similarity with transaction descriptions
-  similarities = []
+  target_texts = []
   for _, transaction in transactions.iterrows():
-      best_slice, max_similarity, best_slice_tokens = find_best_similarity_slice(input_str, transaction['description'], window_size)
-      
-      logging.debug('best slice = %s', best_slice)
-      logging.debug('max_suimilarity = %s', max_similarity )
-      
-      similarities.append({"id": transaction['id'], "embedding": max_similarity})
+    target_texts.append(transaction)
+  
+  results = compare_with_multiple_targets(input_str, target_texts, window_size)
+  
+  similarities = []
+  for result in results: 
+    id, best_slice, max_similarity, best_slice_tokens = result
+    logging.debug('best slice = %s', best_slice)
+    logging.debug('max_suimilarity = %s', max_similarity )
+    similarities.append({"id": id, "embedding": max_similarity})
   
   # Sort similarities in descending order
   similarities.sort(key=lambda x: x['embedding'], reverse=True)
